@@ -4,92 +4,172 @@
 __author__ = 'Wang Haoyu'
 
 import os
-import codecs
+#import sys
+#import codecs
 import jieba
-import logging
-import re
-from collections import defaultdict
-from gensim.models import word2vec
+#import logging
+#import re
+import numpy as np
+import matplotlib.pyplot as plt
+import gensim
+#from gensim.models import word2vec
+#from sklearn.externals import joblib
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import scale
+from sklearn import cross_validation
+from sklearn.svm import SVC
+#from sklearn.decomposition import TruncatedSVD
+from sklearn.decomposition import PCA
+#from sklearn.metrics import roc_curve, auc
+#from scipy import stats
 
 
 
-class Vectoring(object):
-    def __init__(self):
-        self.__stop_words = set()
-        self.__cur_path = os.path.abspath('.')
-        self.__read_sw()
+def parse_seg(seg):
+    word_list = jieba.cut(seg)
+    return list(word_list)
 
-    def __read_sw(self):
-        if len(self.__stop_words) != 0:
-            return
-        sw_path = os.path.join(self.__cur_path, 'Data')
-        sw_filename = 'stopwords_cn.txt'
-        sw_path = os.path.join(sw_path, sw_filename)
-        with open(sw_path, 'r') as f:
-            stop_words_list = f.readlines()
-        for w in stop_words_list:
-            self.__stop_words.add(w.strip('\n'))
-        """
-        少了换行符和空格，手动添加上
-        """
-        self.__stop_words.add('\n')
-        self.__stop_words.add(' ')
+def read_file(dir_name, neg_or_pos):
+    data_path = os.path.join(os.path.abspath('.'), 'Data')
+    dir_path = os.path.join(data_path, dir_name)
+    if neg_or_pos != '':
+        dir_path = os.path.join(dir_path, neg_or_pos)
+    file_list = os.listdir(dir_path)
+    outputs = []
+    for fn in file_list:
+        with open(os.path.join(dir_path, fn), 'r', errors='ignore') as f:
+            seg = parse_seg(f.read().strip())
+            outputs.append(seg)
+    return outputs
 
-    def get_stopwords(self):
-        return self.__stop_words
+def get_vec(word_list, model):
+    word_vec = []
+    for word in word_list:
+        word = word.replace('\n', '')
+        try:
+            word_vec.append(model[word])
+        except KeyError:
+            continue
+    #self.__word_vec = np.concatenate(self.__word_vec)
+    return np.array(word_vec, dtype=float)
 
-    def __read_text(self, tx_path):
-        with open(tx_path, 'r', errors='ignore') as f:
-            re_text = f.read()
-        return re_text.strip()
-
-    def text2word(self, text):
-        seg_list = jieba.cut(text)
-        new_text = []
-
-        for w in seg_list:
-            if w in self.__stop_words:
-                continue
-            new_text.append(w)
-
-        return ' '.join(new_text)   #用空格链接
-
-    def parse_text(self):
-        path = os.path.join(self.__cur_path, 'Data')
-        path = os.path.join(path, 'ChnSentiCorp_htl_unba_10000')
-        path = os.path.join(path, 'neg')
-        file_list = os.listdir(path)
-        text_list = []
-        for fn in file_list:
-            text = self.__read_text(os.path.join(path, fn))
-            text_list.append(self.text2word(text))
-        filename = 'hotel_neg.data'
-        n_path = os.path.join(self.__cur_path, 'Data')
-        n_path = os.path.join(n_path, filename)
-        with codecs.open(n_path, 'w', encoding='UTF-8') as f:
-            for t in text_list:
-                f.write(t)
-        return text_list
-
-    def modeling(self, text_name, model_name):
-        logging.basicConfig(format = '%(asctime)s : %(levelname)s : %(message)s', level = logging.INFO)
-        text = word2vec.Text8Corpus(text_name)   #加载语料
-        model = word2vec.Word2Vec(text, size=400)   #训练skip-gram模型
-
-        model.save('%s.model' % model_name)  #保存模型
-        model.save_word2vec_format('%s.model.bin' % model_name, binary=True)   #格式化保存
-
-    def get_vec(self):
-        #TODO
-        pass
+def build_vec(dir_name, neg_or_pos, model):
+    output = []
+    text_file = read_file(dir_name, neg_or_pos)
+    for word_list in text_file:
+        vec_list = get_vec(word_list, model)
+        if len(vec_list) != 0:
+            output.append(sum(np.array(vec_list))/len(vec_list))
+    return output
 
 
-    def print_sw(self):
-        return self.__stop_words
+def generate_xy(neg_input, pos_input):
+    #1代表正向情感，0代表负向情感
+    y = np.concatenate((np.ones(len(pos_input)), np.zeros(len(neg_input))))
+    X = pos_input[:]
+    for neg in neg_input:
+        X.append(neg)
+    X = np.array(X)
+    return scale(X), y
 
+def load_model():
+    data_path = os.path.join(os.path.abspath('.'), 'Data')
+    model_path = os.path.join(data_path, 'corpus.model.bin')
+    model = gensim.models.KeyedVectors.load_word2vec_format(model_path, binary=True)
+    return model
 
-v = Vectoring()
-l = v.parse_text()
-for s in l:
-    print(s)
+def get_train_Xy(filename, model=None):
+    if model == None:
+        model = load_model()
+    pos_input = build_vec(filename, 'pos', model)
+    neg_input = build_vec(filename, 'neg', model)
 
+    X, y = generate_xy(neg_input, pos_input)
+    X_reduced_trained = PCA(n_components=100).fit_transform(X)
+    #    Y_reduced_trained = PCA(n_components=100).fit_transform(y)
+    Y_reduced_trained = y
+    Y_reduced_trained = Y_reduced_trained.reshape(len(Y_reduced_trained), 1)
+    return X_reduced_trained, Y_reduced_trained, X
+
+def train_svm(model, filename, C=10, is_balanced=1, gamma='auto'):
+    pos_input = build_vec(filename, 'pos', model)
+    neg_input = build_vec(filename, 'neg', model)
+
+    X, y = generate_xy(neg_input, pos_input)
+    X_reduced_trained = PCA(n_components=100).fit_transform(X)
+    #    Y_reduced_trained = PCA(n_components=100).fit_transform(y)
+    Y_reduced_trained = y
+    Y_reduced_trained = Y_reduced_trained.reshape(len(Y_reduced_trained), 1)
+
+    if is_balanced == 1:
+        clf = SVC(C = C, probability=True, gamma=gamma, cache_size=1000, class_weight='balanced')
+    else:
+        clf = SVC(C = C, probability=True, gamma=gamma, cache_size=3000)
+
+    clf.fit(X_reduced_trained, Y_reduced_trained)
+    return clf
+
+def K_fold_cv(filename, model=None):
+    if model == None:
+        model = load_model()
+    pos_input = build_vec(filename, 'pos', model)
+    neg_input = build_vec(filename, 'neg', model)
+
+    X, y = generate_xy(neg_input, pos_input)
+    X_reduced_trained = PCA(n_components=100).fit_transform(X)
+    Y_reduced_trained = y
+#    Y_reduced_trained = Y_reduced_trained.reshape(len(Y_reduced_trained), 1)
+
+    clf = SVC(C = 10, probability=True, gamma='auto', cache_size=1000, class_weight='balanced')
+    scores = cross_validation.cross_val_score(clf, X_reduced_trained, Y_reduced_trained, cv=10)
+    return scores
+
+def grid_search_CV(filename, model=None):
+    if model == None:
+        model = load_model()
+    pos_input = build_vec(filename, 'pos', model)
+    neg_input = build_vec(filename, 'neg', model)
+
+    X, y = generate_xy(neg_input, pos_input)
+    X_reduced_trained = PCA(n_components=100).fit_transform(X)
+    Y_reduced_trained = y
+#    Y_reduced_trained = Y_reduced_trained.reshape(len(Y_reduced_trained), 1)
+
+    svc = SVC(cache_size=2500, class_weight='balanced')
+    param_grid = {"C": [0.1, 1, 10, 20], "gamma": [0.5, 0.01, 0.001, 'auto']}
+    grid = GridSearchCV(svc, param_grid=param_grid, cv=10)
+    grid.fit(X_reduced_trained, Y_reduced_trained)
+
+    print("The best parameters are %s with a score of %0.2f" % (grid.best_params_, grid.best_score_))
+
+def plot_PCA_figure(filename, X=None):
+    model = load_model()
+    if X == None:
+        pos_input = build_vec(filename, 'pos', model)
+        neg_input = build_vec(filename, 'neg', model)
+        X, y = generate_xy(neg_input, pos_input)
+
+    pca = PCA()
+    pca.fit(X)
+    plt.figure(1, figsize=(4, 3))
+    plt.clf()
+    plt.axes([.2, .2, .7, .7])
+
+    plt.plot(pca.explained_variance_, linewidth=2)
+
+    plt.axis('tight')
+    plt.xlabel('n_components')
+    plt.ylabel('explained_variance_')
+
+    plt.show()
+
+#test_svm()
+#test_svm_sbs()
+#plot_PCA_figure( 'xiyou_movie')
+#plot_PCA_figure('ChnSentiCorp_htl_unba_10000')
+#s = K_fold_cv('ChnSentiCorp_htl_unba_10000')
+#s = K_fold_cv( 'xiyou_movie')
+#print(s)
+#print(sum(s)/len(s))
+#grid_search_CV('ChnSentiCorp_htl_unba_10000')
+#grid_search_CV('xiyou_movie')
